@@ -19,10 +19,7 @@
 
 package com.streamxhub.streamx.flink.packer.pipeline.impl
 
-import com.streamxhub.streamx.common.conf.Workspace
 import com.streamxhub.streamx.common.fs.LfsOperator
-import com.streamxhub.streamx.common.util.DateUtils
-import com.streamxhub.streamx.common.util.DateUtils.fullCompact
 import com.streamxhub.streamx.flink.packer.maven.MavenTool
 import com.streamxhub.streamx.flink.packer.pipeline._
 
@@ -37,33 +34,26 @@ class FlinkRemoteBuildPipeline(request: FlinkRemoteBuildRequest) extends BuildPi
 
   override def offerBuildParam: FlinkRemoteBuildRequest = request
 
+
   /**
    * The construction logic needs to be implemented by subclasses
    */
   @throws[Throwable] override protected def buildProcess(): ShadedBuildResponse = {
-    val appName = BuildPipelineHelper.getSafeAppName(request.appName)
-
     // create workspace.
     // the sub workspace path like: APP_WORKSPACE/jobName
-    val buildWorkspace =
     execStep(1) {
-      val buildWorkspace = s"${Workspace.local.APP_WORKSPACE}/$appName"
-      LfsOperator.mkCleanDirs(buildWorkspace)
-      logInfo(s"recreate building workspace: $buildWorkspace")
-      buildWorkspace
+      LfsOperator.mkCleanDirs(request.workspace)
+      logInfo(s"recreate building workspace: ${request.workspace}")
     }.getOrElse(throw getError.exception)
     // build flink job shaded jar
     val shadedJar =
       execStep(2) {
-        val providedLibs = BuildPipelineHelper.extractFlinkProvidedLibs(request)
-        val shadedJarOutputPath = s"$buildWorkspace/streamx-flinkjob_${appName}_${DateUtils.now(fullCompact)}.jar"
-        val flinkLibs = request.dependencyInfo.merge(providedLibs)
-        val output = MavenTool.buildFatJar(request.mainClass, flinkLibs, shadedJarOutputPath)
+        val output = MavenTool.buildFatJar(request.mainClass, request.providedLibs, request.getShadedJarPath(request.workspace))
         logInfo(s"output shaded flink job jar: ${output.getAbsolutePath}")
         output
       }.getOrElse(throw getError.exception)
 
-    ShadedBuildResponse(buildWorkspace, shadedJar.getAbsolutePath)
+    ShadedBuildResponse(request.workspace, shadedJar.getAbsolutePath)
   }
 
 }

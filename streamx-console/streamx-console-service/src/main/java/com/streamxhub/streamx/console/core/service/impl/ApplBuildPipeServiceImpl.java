@@ -26,6 +26,8 @@ import com.github.benmanes.caffeine.cache.Caffeine;
 import com.google.common.collect.Maps;
 import com.streamxhub.streamx.common.conf.ConfigConst;
 import com.streamxhub.streamx.common.conf.Workspace;
+import com.streamxhub.streamx.common.enums.ApplicationType;
+import com.streamxhub.streamx.common.enums.DevelopmentMode;
 import com.streamxhub.streamx.common.enums.ExecutionMode;
 import com.streamxhub.streamx.common.fs.FsOperator;
 import com.streamxhub.streamx.common.util.ExceptionUtils;
@@ -144,14 +146,11 @@ public class ApplBuildPipeServiceImpl
     @Override
     public boolean buildApplication(@Nonnull Application app) throws Exception {
 
-        AppBuildPipeline appBuildPipeline = getById(app.getAppId());
-
         // 1) flink sql setDependency
+        FlinkSql newFlinkSql = flinkSqlService.getCandidate(app.getId(), CandidateType.NEW);
+        FlinkSql effectiveFlinkSql = flinkSqlService.getEffective(app.getId(), false);
         if (app.isFlinkSqlJob()) {
-            FlinkSql flinkSql = flinkSqlService.getCandidate(app.getId(), CandidateType.NEW);
-            if (flinkSql == null) {
-                flinkSql = flinkSqlService.getEffective(app.getId(), false);
-            }
+            FlinkSql flinkSql = newFlinkSql == null ? effectiveFlinkSql : newFlinkSql;
             assert flinkSql != null;
             app.setDependency(flinkSql.getDependency());
         }
@@ -169,11 +168,6 @@ public class ApplBuildPipeServiceImpl
 
                 // 1) checkEnv
                 applicationService.checkEnv(app);
-
-                // 2) backup.
-                if (appBuildPipeline != null) {
-                    backUpService.backup(app);
-                }
 
                 // 3) some preparatory work
                 String appUploads = app.getWorkspace().APP_UPLOADS();
@@ -199,7 +193,7 @@ public class ApplBuildPipeServiceImpl
                                 break;
                             default:
                                 throw new IllegalArgumentException("[StreamX] unsupported ApplicationType of custom code: "
-                                    + app.getApplicationType());
+                                        + app.getApplicationType());
                         }
                     } else {
                         fsOperator.upload(app.getDistHome(), appHome);
@@ -238,12 +232,25 @@ public class ApplBuildPipeServiceImpl
                         app.setOptionState(OptionState.NONE.getValue());
                         app.setLaunch(LaunchState.DONE.get());
                     }
+
                     //如果当前任务未运行,或者刚刚新增的任务,则直接将候选版本的设置为正式版本
-                    FlinkSql flinkSql = flinkSqlService.getEffective(app.getId(), false);
-                    if (!app.isRunning() || flinkSql == null) {
-                        applicationService.toEffective(app);
+                    if (!app.isRunning()) {
+                        if (app.isFlinkSqlJob()) {
+                            applicationService.toEffective(app);
+                        }
                     }
+
+                    // backup.
+                    if (!app.isNeedRollback()) {
+                        if (app.isFlinkSqlJob() && newFlinkSql != null) {
+                            backUpService.backup(app, newFlinkSql);
+                        } else {
+                            backUpService.backup(app, null);
+                        }
+                    }
+
                     app.setBuild(false);
+
                 } else {
                     Message message = new Message(
                             commonService.getCurrentUser().getUserId(),
@@ -301,11 +308,18 @@ public class ApplBuildPipeServiceImpl
         String mainClass = ConfigConst.STREAMX_FLINKSQL_CLIENT_CLASS();
         switch (executionMode) {
             case YARN_APPLICATION:
+                String yarnProvidedPath = app.getAppLib();
+                String localWorkspace = app.getLocalAppHome().concat("/lib");
+                if (app.getDevelopmentMode().equals(DevelopmentMode.CUSTOMCODE)
+                        && app.getApplicationType().equals(ApplicationType.APACHE_FLINK)) {
+                    yarnProvidedPath = app.getAppHome();
+                    localWorkspace = app.getLocalAppHome();
+                }
                 FlinkYarnApplicationBuildRequest yarnAppRequest = new FlinkYarnApplicationBuildRequest(
                         app.getJobName(),
                         mainClass,
-                        app.getLocalAppHome().concat("/lib"),
-                        app.getAppLib(),
+                        localWorkspace,
+                        yarnProvidedPath,
                         app.getDevelopmentMode(),
                         app.getDependencyInfo()
                 );
@@ -316,6 +330,7 @@ public class ApplBuildPipeServiceImpl
             case REMOTE:
                 FlinkRemoteBuildRequest remoteBuildRequest = new FlinkRemoteBuildRequest(
                         app.getJobName(),
+                        app.getLocalAppHome(),
                         mainClass,
                         flinkUserJar,
                         app.getExecutionModeEnum(),
@@ -328,6 +343,7 @@ public class ApplBuildPipeServiceImpl
             case KUBERNETES_NATIVE_SESSION:
                 FlinkK8sSessionBuildRequest k8sSessionBuildRequest = new FlinkK8sSessionBuildRequest(
                         app.getJobName(),
+                        app.getLocalAppHome(),
                         mainClass,
                         flinkUserJar,
                         app.getExecutionModeEnum(),
@@ -341,6 +357,7 @@ public class ApplBuildPipeServiceImpl
             case KUBERNETES_NATIVE_APPLICATION:
                 FlinkK8sApplicationBuildRequest k8sApplicationBuildRequest = new FlinkK8sApplicationBuildRequest(
                         app.getJobName(),
+                        app.getLocalAppHome(),
                         mainClass,
                         flinkUserJar,
                         app.getExecutionModeEnum(),
